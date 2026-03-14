@@ -1,0 +1,72 @@
+# Deep Learning Framework
+torch
+torchvision
+torchmetrics
+einops
+timm
+
+# CARROT PK sampling
+pytorch-metric-learning
+
+# Data Processing
+numpy
+numba
+pandas
+Pillow
+scikit-learn
+scipy
+
+# Image Processing
+opencv-python
+scikit-image
+
+# File formats
+pyarrow
+fastparquet
+
+# Graphical Models
+networkx
+
+# Model Saving and Loading
+joblib
+
+# Interpretability
+captum
+
+# Graph Neural Networks
+torch-geometric
+
+# Experiment tracking and visualization
+tensorboard
+
+# Configuration management
+pyyaml
+
+# HTTP requests
+requests
+
+# Configuration
+PyYAML
+
+# Visualization
+matplotlib
+seaborn
+
+# Optional: for better performance
+matplotlib
+seaborn
+
+# Computer Vision
+opencv-python
+
+# Optional dependencies for advanced features
+# wandb>=0.12.0  # For experiment tracking (uncomment if needed)
+# tensorboard>=2.10.0  # For TensorBoard logging (uncomment if needed)
+ptflops  # For FLOPs computation
+
+# Development dependencies (optional)
+# pytest>=6.0.0
+# black>=21.0.0
+# flake8>=3.9.0
+
+datasets
