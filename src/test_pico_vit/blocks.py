@@ -76,12 +76,17 @@ class SpecialViTBlock(nn.Module):
         else:
             self.udtw = FallbackUDTW()
 
-    def _merge(self, seq_a: torch.Tensor, seq_b: torch.Tensor, sigma_b: torch.Tensor) -> torch.Tensor:
+    def _merge_patches(self, seq_a: torch.Tensor, seq_b: torch.Tensor, sigma_b: torch.Tensor) -> torch.Tensor:
         if self.merge_mode == "mul":
             return seq_a + seq_b * sigma_b
         if self.merge_mode == "add":
             return seq_a + seq_b + sigma_b
         raise ValueError(f"Unsupported merge mode: {self.merge_mode}")
+
+    def _merge_keep_cls(self, seq_a: torch.Tensor, seq_b: torch.Tensor, sigma_b: torch.Tensor) -> torch.Tensor:
+        cls_out = seq_a[:, :1] + seq_b[:, :1]
+        patch_out = self._merge_patches(seq_a[:, 1:], seq_b[:, 1:], sigma_b)
+        return torch.cat([cls_out, patch_out], dim=1)
 
     def _sigma_stats(self, prefix: str, sigma: torch.Tensor) -> Dict[str, torch.Tensor]:
         return {
@@ -95,19 +100,23 @@ class SpecialViTBlock(nn.Module):
         original_x = x
         norm1_x = self.norm1(x)
         attn_out = self.attn(norm1_x)
-        sigma_x = self.sigmanet_norm1(original_x, self.sigma_a, self.sigma_b)
-        sigma_attn = self.sigmanet_attn(attn_out, self.sigma_a, self.sigma_b)
-        dtw_attn_d, dtw_attn_s = self.udtw(original_x, attn_out, sigma_x, sigma_attn, beta=self.udtw_beta)
-        x = self._merge(x, attn_out, sigma_attn)
+        original_patch = original_x[:, 1:]
+        attn_patch = attn_out[:, 1:]
+        sigma_x = self.sigmanet_norm1(original_patch, self.sigma_a, self.sigma_b)
+        sigma_attn = self.sigmanet_attn(attn_patch, self.sigma_a, self.sigma_b)
+        dtw_attn_d, dtw_attn_s = self.udtw(original_patch, attn_patch, sigma_x, sigma_attn, beta=self.udtw_beta)
+        x = self._merge_keep_cls(x, attn_out, sigma_attn)
 
         norm2_x = self.norm2(x)
         mlp_out = self.mlp(norm2_x)
-        sigma_x = self.sigmanet_norm2(original_x, self.sigma_a, self.sigma_b)
-        sigma_mlp = self.sigmanet_mlp(mlp_out, self.sigma_a, self.sigma_b)
-        dtw_mlp_d, dtw_mlp_s = self.udtw(original_x, mlp_out, sigma_x, sigma_mlp, beta=self.udtw_beta)
-        x = self._merge(x, mlp_out, sigma_mlp)
+        mlp_patch = mlp_out[:, 1:]
+        sigma_x = self.sigmanet_norm2(original_patch, self.sigma_a, self.sigma_b)
+        sigma_mlp = self.sigmanet_mlp(mlp_patch, self.sigma_a, self.sigma_b)
+        dtw_mlp_d, dtw_mlp_s = self.udtw(original_patch, mlp_patch, sigma_x, sigma_mlp, beta=self.udtw_beta)
+        x = self._merge_keep_cls(x, mlp_out, sigma_mlp)
 
-        aux_loss = (dtw_attn_d.mean() + dtw_attn_s.mean() + dtw_mlp_d.mean() + dtw_mlp_s.mean()) / (x.size(1) ** 2)
+        patch_len = max(1, x.size(1) - 1)
+        aux_loss = (dtw_attn_d.mean() + dtw_attn_s.mean() + dtw_mlp_d.mean() + dtw_mlp_s.mean()) / (patch_len ** 2)
         stats = {"aux_loss": aux_loss}
         stats.update(self._sigma_stats("sigma_attn", sigma_attn))
         stats.update(self._sigma_stats("sigma_mlp", sigma_mlp))
