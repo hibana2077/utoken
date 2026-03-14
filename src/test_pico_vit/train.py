@@ -58,6 +58,7 @@ def train_one(
         running_correct = 0
         running_total = 0
         last_aux = 0.0
+        last_sigma_stats: Dict[str, float] = {}
         for images, labels in train_loader:
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -73,16 +74,41 @@ def train_one(
             running_correct += (logits.argmax(dim=-1) == labels).sum().item()
             running_total += labels.size(0)
             last_aux = float(stats["aux_loss"].item())
+            if variant == "special":
+                for key in [
+                    "sigma_attn_mean",
+                    "sigma_attn_max",
+                    "sigma_attn_min",
+                    "sigma_attn_std",
+                    "sigma_mlp_mean",
+                    "sigma_mlp_max",
+                    "sigma_mlp_min",
+                    "sigma_mlp_std",
+                ]:
+                    if key in stats:
+                        last_sigma_stats[key] = float(stats[key].item())
 
         train_loss = running_loss / running_total
         train_acc = running_correct / running_total
         val_metrics = evaluate(model, val_loader, device, cfg.aux_weight)
         best_val_acc = max(best_val_acc, val_metrics["acc"])
-        print(
+        line = (
             f"{variant:8s} | epoch={epoch:02d} | train_loss={train_loss:.4f} | train_acc={train_acc:.3f} | "
             f"val_loss={val_metrics['loss']:.4f} | val_acc={val_metrics['acc']:.3f} | "
             f"aux={last_aux:.4f}"
         )
+        if variant == "special" and last_sigma_stats:
+            line += (
+                f" | sigma_attn_mean={last_sigma_stats.get('sigma_attn_mean', 0.0):.3f}"
+                f" | sigma_attn_max={last_sigma_stats.get('sigma_attn_max', 0.0):.3f}"
+                f" | sigma_attn_min={last_sigma_stats.get('sigma_attn_min', 0.0):.3f}"
+                f" | sigma_attn_std={last_sigma_stats.get('sigma_attn_std', 0.0):.3f}"
+                f" | sigma_mlp_mean={last_sigma_stats.get('sigma_mlp_mean', 0.0):.3f}"
+                f" | sigma_mlp_max={last_sigma_stats.get('sigma_mlp_max', 0.0):.3f}"
+                f" | sigma_mlp_min={last_sigma_stats.get('sigma_mlp_min', 0.0):.3f}"
+                f" | sigma_mlp_std={last_sigma_stats.get('sigma_mlp_std', 0.0):.3f}"
+            )
+        print(line)
     return best_val_acc
 
 

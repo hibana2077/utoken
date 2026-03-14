@@ -73,14 +73,20 @@ class TestPicoViT(nn.Module):
         x = self.pos_drop(x)
 
         aux_loss = x.new_zeros(())
-        last_stats: Dict[str, torch.Tensor] = {}
+        sigma_sums: Dict[str, torch.Tensor] = {}
+        sigma_count = 0
         for block in self.blocks:
             x, stats = block(x)
             aux_loss = aux_loss + stats["aux_loss"]
-            last_stats = stats
+            sigma_stats = {k: v for k, v in stats.items() if k != "aux_loss"}
+            if sigma_stats:
+                sigma_count += 1
+                for key, value in sigma_stats.items():
+                    sigma_sums[key] = sigma_sums.get(key, x.new_zeros(())) + value
         cls_token = self.norm(x[:, 0])
         stats_out = {"aux_loss": aux_loss}
-        stats_out.update({k: v for k, v in last_stats.items() if k != "aux_loss"})
+        if sigma_count > 0:
+            stats_out.update({k: v / sigma_count for k, v in sigma_sums.items()})
         return cls_token, stats_out
 
     def forward_head(self, x: torch.Tensor) -> torch.Tensor:
