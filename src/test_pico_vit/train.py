@@ -40,17 +40,15 @@ def evaluate(
     return {"loss": total_loss / total, "acc": total_correct / total}
 
 
-def train(cfg: TrainConfig) -> None:
+def train_one(
+    cfg: TrainConfig,
+    variant: str,
+    train_loader: torch.utils.data.DataLoader,
+    val_loader: torch.utils.data.DataLoader,
+    device: torch.device,
+) -> float:
     set_seed(cfg.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"device={device} | model={cfg.model_name} | dataset=cifar10")
-
-    train_loader, val_loader = build_cifar10_loaders(
-        data_dir=cfg.data_dir,
-        batch_size=cfg.batch_size,
-        workers=cfg.workers,
-    )
-    model = create_model(cfg, device).to(device)
+    model = create_model(cfg, device, variant=variant).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     best_val_acc = 0.0
 
@@ -81,16 +79,39 @@ def train(cfg: TrainConfig) -> None:
         val_metrics = evaluate(model, val_loader, device, cfg.aux_weight)
         best_val_acc = max(best_val_acc, val_metrics["acc"])
         print(
-            f"epoch={epoch:02d} | train_loss={train_loss:.4f} | train_acc={train_acc:.3f} | "
+            f"{variant:8s} | epoch={epoch:02d} | train_loss={train_loss:.4f} | train_acc={train_acc:.3f} | "
             f"val_loss={val_metrics['loss']:.4f} | val_acc={val_metrics['acc']:.3f} | "
             f"aux={last_aux:.4f}"
         )
-    print(f"summary | best_val_acc={best_val_acc:.3f}")
+    return best_val_acc
+
+
+def train(cfg: TrainConfig) -> None:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(
+        f"device={device} | model={cfg.model_name} | dataset=cifar10 | "
+        f"train_mode={cfg.train_mode}"
+    )
+
+    train_loader, val_loader = build_cifar10_loaders(
+        data_dir=cfg.data_dir,
+        batch_size=cfg.batch_size,
+        workers=cfg.workers,
+    )
+
+    variants = ["special", "baseline"] if cfg.train_mode == "both" else [cfg.train_mode]
+    results: Dict[str, float] = {}
+    for variant in variants:
+        results[variant] = train_one(cfg, variant, train_loader, val_loader, device)
+
+    summary_parts = [f"{name}_best_val_acc={acc:.3f}" for name, acc in results.items()]
+    print("summary | " + " | ".join(summary_parts))
 
 
 def parse_args() -> TrainConfig:
     parser = argparse.ArgumentParser("Train test_pico_vit on CIFAR-10")
     parser.add_argument("--model-name", default="test_pico_vit", choices=["test_pico_vit"])
+    parser.add_argument("--train-mode", default="both", choices=["special", "baseline", "both"])
     parser.add_argument("--data-dir", type=str, default="data")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=128)
@@ -110,6 +131,7 @@ def parse_args() -> TrainConfig:
 
     return TrainConfig(
         model_name=args.model_name,
+        train_mode=args.train_mode,
         data_dir=args.data_dir,
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -130,4 +152,3 @@ def parse_args() -> TrainConfig:
 
 if __name__ == "__main__":
     train(parse_args())
-

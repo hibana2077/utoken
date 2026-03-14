@@ -9,9 +9,9 @@ from .modules import PatchEmbed
 
 
 class TestPicoViT(nn.Module):
-    def __init__(self, cfg: TrainConfig, use_cuda_dtw: bool) -> None:
+    def __init__(self, cfg: TrainConfig, use_cuda_dtw: bool, use_special_blocks: bool = True) -> None:
         super().__init__()
-        if cfg.depth < 4:
+        if use_special_blocks and cfg.depth < 4:
             raise ValueError("depth must be >= 4 so two special blocks can stay in the middle.")
 
         self.patch_embed = PatchEmbed(cfg.image_size, cfg.patch_size, cfg.in_chans, cfg.embed_dim)
@@ -21,8 +21,10 @@ class TestPicoViT(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_prefix_tokens, cfg.embed_dim))
         self.pos_drop = nn.Dropout(cfg.drop_rate)
 
-        mid = cfg.depth // 2
-        special_indices = {max(1, mid - 1), min(cfg.depth - 2, mid)}
+        special_indices = set()
+        if use_special_blocks:
+            mid = cfg.depth // 2
+            special_indices = {max(1, mid - 1), min(cfg.depth - 2, mid)}
         blocks: List[nn.Module] = []
         for i in range(cfg.depth):
             if i in special_indices:
@@ -89,4 +91,3 @@ class TestPicoViT(nn.Module):
         feats, stats = self.forward_features(x)
         logits = self.forward_head(feats)
         return logits, stats
-

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 @dataclass
 class TrainConfig:
     model_name: str = "test_pico_vit"
+    train_mode: str = "both"
     num_classes: int = 10
     image_size: int = 32
     patch_size: int = 4
@@ -27,4 +28,3 @@ class TrainConfig:
     lr: float = 3e-4
     weight_decay: float = 0.05
     seed: int = 7
-
