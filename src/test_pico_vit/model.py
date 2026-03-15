@@ -102,7 +102,7 @@ class TestPicoViT(nn.Module):
                     if key == "aux_loss":
                         continue
                     sigma_sums[key] = sigma_sums.get(key, x.new_zeros(())) + value
-        cls_token = self.norm(x[:, 0])
+        cls_token = self.norm(x[:, 0]) # (B, D)
         stats_out = {"aux_loss": aux_loss}
         if sigma_count > 0:
             stats_out.update({k: v / sigma_count for k, v in sigma_sums.items()})
@@ -113,6 +113,6 @@ class TestPicoViT(nn.Module):
         return self.head(x)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        feats, stats = self.forward_features(x)
-        logits = self.forward_head(feats)
+        feats, stats = self.forward_features(x) # feats: (B, D)
+        logits = self.forward_head(feats) # (B, num_classes)
         return logits, stats

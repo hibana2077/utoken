@@ -71,7 +71,7 @@ class BlockSequenceAdapter(nn.Module):
 
     def _merge_into_target(self, seq_b: torch.Tensor, sigma_b: torch.Tensor) -> torch.Tensor:
         if self.merge_mode == "mul":
-            return seq_b * sigma_b
+            return seq_b * (2.0 - sigma_b)
         raise ValueError(f"Unsupported merge mode: {self.merge_mode}")
 
     def _sigma_stats(self, sigma: torch.Tensor) -> Dict[str, torch.Tensor]:
