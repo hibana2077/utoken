@@ -7,7 +7,9 @@ from .modules import SigmaNet, TinyAttention, TinyMlp
 
 try:
     from src.udtw import uDTW as NativeUDTW
+    print("Using native uDTW implementation.")
 except Exception:
+    print("Native uDTW not available, using fallback implementation.")
     NativeUDTW = None
 
 
@@ -43,13 +45,10 @@ class StandardViTBlock(nn.Module):
         return x, {"aux_loss": x.new_zeros(())}
 
 
-class SpecialViTBlock(nn.Module):
+class BlockSequenceAdapter(nn.Module):
     def __init__(
         self,
         dim: int,
-        num_heads: int,
-        mlp_ratio: float,
-        drop: float,
         merge_mode: str,
         use_cuda_dtw: bool,
         udtw_gamma: float,
@@ -59,14 +58,8 @@ class SpecialViTBlock(nn.Module):
         sigma_b: float,
     ) -> None:
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = TinyAttention(dim, num_heads, qkv_bias=True, proj_drop=drop)
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = TinyMlp(dim, mlp_ratio=mlp_ratio, drop=drop)
-        self.sigmanet_norm1 = SigmaNet(dim, sigma_hidden_dim)
-        self.sigmanet_attn = SigmaNet(dim, sigma_hidden_dim)
-        self.sigmanet_norm2 = SigmaNet(dim, sigma_hidden_dim)
-        self.sigmanet_mlp = SigmaNet(dim, sigma_hidden_dim)
+        self.sigmanet_a = SigmaNet(dim, sigma_hidden_dim)
+        self.sigmanet_b = SigmaNet(dim, sigma_hidden_dim)
         self.merge_mode = merge_mode
         self.udtw_beta = udtw_beta
         self.sigma_a = sigma_a
@@ -76,48 +69,34 @@ class SpecialViTBlock(nn.Module):
         else:
             self.udtw = FallbackUDTW()
 
-    def _merge_patches(self, seq_a: torch.Tensor, seq_b: torch.Tensor, sigma_b: torch.Tensor) -> torch.Tensor:
+    def _merge_into_target(self, seq_b: torch.Tensor, sigma_b: torch.Tensor) -> torch.Tensor:
         if self.merge_mode == "mul":
-            return seq_a + seq_b * sigma_b
-        if self.merge_mode == "add":
-            return seq_a + seq_b + sigma_b
+            return seq_b * sigma_b
         raise ValueError(f"Unsupported merge mode: {self.merge_mode}")
 
-    def _merge_keep_cls(self, seq_a: torch.Tensor, seq_b: torch.Tensor, sigma_b: torch.Tensor) -> torch.Tensor:
-        cls_out = seq_a[:, :1] + seq_b[:, :1]
-        patch_out = self._merge_patches(seq_a[:, 1:], seq_b[:, 1:], sigma_b)
-        return torch.cat([cls_out, patch_out], dim=1)
-
-    def _sigma_stats(self, prefix: str, sigma: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def _sigma_stats(self, sigma: torch.Tensor) -> Dict[str, torch.Tensor]:
         return {
-            f"{prefix}_mean": sigma.mean().detach(),
-            f"{prefix}_max": sigma.max().detach(),
-            f"{prefix}_min": sigma.min().detach(),
-            f"{prefix}_std": sigma.std().detach(),
+            "sigma_mean": sigma.mean().detach(),
+            "sigma_max": sigma.max().detach(),
+            "sigma_min": sigma.min().detach(),
+            "sigma_std": sigma.std().detach(),
         }
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        original_x = x
-        norm1_x = self.norm1(x)
-        attn_out = self.attn(norm1_x)
-        original_patch = original_x[:, 1:]
-        attn_patch = attn_out[:, 1:]
-        sigma_x = self.sigmanet_norm1(original_patch, self.sigma_a, self.sigma_b)
-        sigma_attn = self.sigmanet_attn(attn_patch, self.sigma_a, self.sigma_b)
-        dtw_attn_d, dtw_attn_s = self.udtw(original_patch, attn_patch, sigma_x, sigma_attn, beta=self.udtw_beta)
-        x = self._merge_keep_cls(x, attn_out, sigma_attn)
+    def estimate_seq_a(self, seq_a: torch.Tensor) -> torch.Tensor:
+        return self.sigmanet_a(seq_a, self.sigma_a, self.sigma_b)
 
-        norm2_x = self.norm2(x)
-        mlp_out = self.mlp(norm2_x)
-        mlp_patch = mlp_out[:, 1:]
-        sigma_x = self.sigmanet_norm2(original_patch, self.sigma_a, self.sigma_b)
-        sigma_mlp = self.sigmanet_mlp(mlp_patch, self.sigma_a, self.sigma_b)
-        dtw_mlp_d, dtw_mlp_s = self.udtw(original_patch, mlp_patch, sigma_x, sigma_mlp, beta=self.udtw_beta)
-        x = self._merge_keep_cls(x, mlp_out, sigma_mlp)
+    def apply_seq_b(
+        self,
+        seq_a: torch.Tensor,
+        sigma_a: torch.Tensor,
+        seq_b: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        sigma_b = self.sigmanet_b(seq_b, self.sigma_a, self.sigma_b)
+        dtw_d, dtw_s = self.udtw(seq_a, seq_b, sigma_a, sigma_b, beta=self.udtw_beta)
+        merged = self._merge_into_target(seq_b, sigma_b)
 
-        patch_len = max(1, x.size(1) - 1)
-        aux_loss = (dtw_attn_d.mean() + dtw_attn_s.mean() + dtw_mlp_d.mean() + dtw_mlp_s.mean()) / (patch_len ** 2)
+        seq_len = max(1, seq_b.size(1))
+        aux_loss = (dtw_d.mean() + dtw_s.mean()) / (seq_len ** 2)
         stats = {"aux_loss": aux_loss}
-        stats.update(self._sigma_stats("sigma_attn", sigma_attn))
-        stats.update(self._sigma_stats("sigma_mlp", sigma_mlp))
-        return x, stats
+        stats.update(self._sigma_stats(sigma_b))
+        return merged, stats

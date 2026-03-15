@@ -13,5 +13,5 @@ def create_model(cfg: TrainConfig, device: torch.device, variant: str = "special
     return TestPicoViT(
         cfg=cfg,
         use_cuda_dtw=device.type == "cuda",
-        use_special_blocks=variant == "special",
+        enable_sigma_path=variant == "special",
     )

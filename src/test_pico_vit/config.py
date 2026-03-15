@@ -16,6 +16,7 @@ class TrainConfig:
     drop_rate: float = 0.0
     aux_weight: float = 0.1
     merge_mode: str = "mul"
+    sequence_pair: str = "el"
     sigma_hidden_dim: int = 64
     sigma_a: float = 1.5
     sigma_b: float = 0.5
@@ -28,6 +29,3 @@ class TrainConfig:
     lr: float = 3e-4
     weight_decay: float = 0.05
     seed: int = 7
-    ece_bins: int = 15
-    eval_corruptions: bool = True
-    corruption_severity: int = 3
