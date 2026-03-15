@@ -52,6 +52,20 @@ def _normalize_cifar10(images: torch.Tensor) -> torch.Tensor:
     return (images - mean) / std
 
 
+def _gaussian_blur_images(images: torch.Tensor, kernel_size: int, sigma: float) -> torch.Tensor:
+    if kernel_size % 2 == 0:
+        raise ValueError("kernel_size must be odd")
+    radius = kernel_size // 2
+    coords = torch.arange(-radius, radius + 1, device=images.device, dtype=images.dtype)
+    kernel_1d = torch.exp(-(coords**2) / (2.0 * (sigma**2)))
+    kernel_1d = kernel_1d / kernel_1d.sum()
+    kernel_2d = torch.outer(kernel_1d, kernel_1d)
+    kernel_2d = kernel_2d.view(1, 1, kernel_size, kernel_size)
+    kernel_2d = kernel_2d.expand(images.size(1), 1, kernel_size, kernel_size)
+    padded = F.pad(images, (radius, radius, radius, radius), mode="reflect")
+    return F.conv2d(padded, kernel_2d, groups=images.size(1))
+
+
 def make_corruption_fn(name: str, severity: int) -> Callable[[torch.Tensor], torch.Tensor]:
     severity = max(1, min(5, severity))
     if name == "gaussian_noise":
@@ -70,7 +84,7 @@ def make_corruption_fn(name: str, severity: int) -> Callable[[torch.Tensor], tor
 
         def fn(images: torch.Tensor) -> torch.Tensor:
             x = _denormalize_cifar10(images)
-            x = F.gaussian_blur(x, kernel_size=[kernel, kernel], sigma=[sigma, sigma])
+            x = _gaussian_blur_images(x, kernel_size=kernel, sigma=sigma)
             x = x.clamp(0.0, 1.0)
             return _normalize_cifar10(x)
 
