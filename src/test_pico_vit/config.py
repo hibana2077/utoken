@@ -28,3 +28,6 @@ class TrainConfig:
     lr: float = 3e-4
     weight_decay: float = 0.05
     seed: int = 7
+    ece_bins: int = 15
+    eval_corruptions: bool = True
+    corruption_severity: int = 3

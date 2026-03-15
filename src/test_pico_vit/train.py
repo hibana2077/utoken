@@ -1,6 +1,6 @@
 import argparse
 import random
-from typing import Dict
+from typing import Callable, Dict, Iterable
 
 import torch
 import torch.nn.functional as F
@@ -17,27 +17,168 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
+CIFAR10_STD = (0.2470, 0.2435, 0.2616)
+
+
+def compute_ece(
+    confidences: torch.Tensor,
+    correctness: torch.Tensor,
+    n_bins: int = 15,
+) -> float:
+    bin_boundaries = torch.linspace(0.0, 1.0, n_bins + 1, device=confidences.device)
+    ece = confidences.new_zeros(())
+    for i in range(n_bins):
+        lo = bin_boundaries[i]
+        hi = bin_boundaries[i + 1]
+        in_bin = (confidences > lo) & (confidences <= hi)
+        if in_bin.any():
+            bin_acc = correctness[in_bin].float().mean()
+            bin_conf = confidences[in_bin].mean()
+            bin_weight = in_bin.float().mean()
+            ece = ece + (bin_conf - bin_acc).abs() * bin_weight
+    return float(ece.item())
+
+
+def _denormalize_cifar10(images: torch.Tensor) -> torch.Tensor:
+    mean = images.new_tensor(CIFAR10_MEAN).view(1, 3, 1, 1)
+    std = images.new_tensor(CIFAR10_STD).view(1, 3, 1, 1)
+    return images * std + mean
+
+
+def _normalize_cifar10(images: torch.Tensor) -> torch.Tensor:
+    mean = images.new_tensor(CIFAR10_MEAN).view(1, 3, 1, 1)
+    std = images.new_tensor(CIFAR10_STD).view(1, 3, 1, 1)
+    return (images - mean) / std
+
+
+def make_corruption_fn(name: str, severity: int) -> Callable[[torch.Tensor], torch.Tensor]:
+    severity = max(1, min(5, severity))
+    if name == "gaussian_noise":
+        sigma = 0.04 * severity
+
+        def fn(images: torch.Tensor) -> torch.Tensor:
+            x = _denormalize_cifar10(images)
+            x = x + torch.randn_like(x) * sigma
+            x = x.clamp(0.0, 1.0)
+            return _normalize_cifar10(x)
+
+        return fn
+    if name == "gaussian_blur":
+        kernel = 2 * severity + 1
+        sigma = 0.4 + 0.3 * severity
+
+        def fn(images: torch.Tensor) -> torch.Tensor:
+            x = _denormalize_cifar10(images)
+            x = F.gaussian_blur(x, kernel_size=[kernel, kernel], sigma=[sigma, sigma])
+            x = x.clamp(0.0, 1.0)
+            return _normalize_cifar10(x)
+
+        return fn
+    if name == "brightness":
+        factor = 1.0 - 0.12 * severity
+
+        def fn(images: torch.Tensor) -> torch.Tensor:
+            x = _denormalize_cifar10(images)
+            x = (x * factor).clamp(0.0, 1.0)
+            return _normalize_cifar10(x)
+
+        return fn
+    if name == "contrast":
+        factor = 1.0 - 0.15 * severity
+
+        def fn(images: torch.Tensor) -> torch.Tensor:
+            x = _denormalize_cifar10(images)
+            mean = x.mean(dim=(2, 3), keepdim=True)
+            x = ((x - mean) * factor + mean).clamp(0.0, 1.0)
+            return _normalize_cifar10(x)
+
+        return fn
+    raise ValueError(f"Unsupported corruption: {name}")
+
+
 def evaluate(
     model: torch.nn.Module,
     loader: torch.utils.data.DataLoader,
     device: torch.device,
     aux_weight: float,
+    ece_bins: int,
+    corruption_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> Dict[str, float]:
     model.eval()
     total_loss = 0.0
+    total_nll = 0.0
+    total_brier = 0.0
     total_correct = 0
     total = 0
+    all_confidences = []
+    all_correctness = []
     with torch.no_grad():
         for images, labels in loader:
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
+            if corruption_fn is not None:
+                images = corruption_fn(images)
             logits, stats = model(images)
             ce_loss = F.cross_entropy(logits, labels)
             loss = ce_loss + aux_weight * stats["aux_loss"]
+            probs = F.softmax(logits, dim=-1)
+            pred_conf, preds = probs.max(dim=-1)
+            correct = preds.eq(labels)
+            labels_one_hot = F.one_hot(labels, num_classes=probs.size(1)).float()
+            brier = (probs - labels_one_hot).pow(2).sum(dim=1).mean()
+
             total_loss += loss.item() * labels.size(0)
-            total_correct += (logits.argmax(dim=-1) == labels).sum().item()
+            total_nll += ce_loss.item() * labels.size(0)
+            total_brier += brier.item() * labels.size(0)
+            total_correct += correct.sum().item()
             total += labels.size(0)
-    return {"loss": total_loss / total, "acc": total_correct / total}
+            all_confidences.append(pred_conf)
+            all_correctness.append(correct)
+
+    confidences = torch.cat(all_confidences, dim=0)
+    correctness = torch.cat(all_correctness, dim=0)
+    avg_conf = float(confidences.mean().item())
+    acc = total_correct / total
+    return {
+        "loss": total_loss / total,
+        "acc": acc,
+        "nll": total_nll / total,
+        "ece": compute_ece(confidences, correctness, n_bins=ece_bins),
+        "brier": total_brier / total,
+        "avg_conf": avg_conf,
+        "conf_gap": avg_conf - acc,
+    }
+
+
+def evaluate_corruption_robustness(
+    model: torch.nn.Module,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    aux_weight: float,
+    ece_bins: int,
+    corruption_names: Iterable[str],
+    severity: int,
+) -> Dict[str, float]:
+    metrics: Dict[str, float] = {}
+    acc_values = []
+    for name in corruption_names:
+        fn = make_corruption_fn(name, severity)
+        m = evaluate(
+            model=model,
+            loader=loader,
+            device=device,
+            aux_weight=aux_weight,
+            ece_bins=ece_bins,
+            corruption_fn=fn,
+        )
+        metrics[f"acc_{name}"] = m["acc"]
+        metrics[f"nll_{name}"] = m["nll"]
+        metrics[f"ece_{name}"] = m["ece"]
+        acc_values.append(m["acc"])
+
+    metrics["acc_corruption_mean"] = sum(acc_values) / max(len(acc_values), 1)
+    return metrics
 
 
 def train_one(
@@ -90,13 +231,36 @@ def train_one(
 
         train_loss = running_loss / running_total
         train_acc = running_correct / running_total
-        val_metrics = evaluate(model, val_loader, device, cfg.aux_weight)
+        val_metrics = evaluate(model, val_loader, device, cfg.aux_weight, cfg.ece_bins)
+        corruption_metrics: Dict[str, float] = {}
+        if cfg.eval_corruptions:
+            corruption_metrics = evaluate_corruption_robustness(
+                model=model,
+                loader=val_loader,
+                device=device,
+                aux_weight=cfg.aux_weight,
+                ece_bins=cfg.ece_bins,
+                corruption_names=("gaussian_noise", "gaussian_blur", "brightness", "contrast"),
+                severity=cfg.corruption_severity,
+            )
         best_val_acc = max(best_val_acc, val_metrics["acc"])
         line = (
             f"{variant:8s} | epoch={epoch:02d} | train_loss={train_loss:.4f} | train_acc={train_acc:.3f} | "
             f"val_loss={val_metrics['loss']:.4f} | val_acc={val_metrics['acc']:.3f} | "
+            f"val_nll={val_metrics['nll']:.4f} | val_ece={val_metrics['ece']:.4f} | "
+            f"val_brier={val_metrics['brier']:.4f} | val_conf_gap={val_metrics['conf_gap']:.4f} | "
             f"aux={last_aux:.4f}"
         )
+        if corruption_metrics:
+            corr_drop = val_metrics["acc"] - corruption_metrics["acc_corruption_mean"]
+            line += (
+                f" | corr_acc_mean={corruption_metrics['acc_corruption_mean']:.3f}"
+                f" | corr_drop={corr_drop:.3f}"
+                f" | noise_acc={corruption_metrics['acc_gaussian_noise']:.3f}"
+                f" | blur_acc={corruption_metrics['acc_gaussian_blur']:.3f}"
+                f" | bright_acc={corruption_metrics['acc_brightness']:.3f}"
+                f" | contrast_acc={corruption_metrics['acc_contrast']:.3f}"
+            )
         if variant == "special" and last_sigma_stats:
             line += (
                 f" | sigma_attn_mean={last_sigma_stats.get('sigma_attn_mean', 0.0):.3f}"
@@ -153,6 +317,9 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--ece-bins", type=int, default=15)
+    parser.add_argument("--skip-corruption-eval", action="store_true")
+    parser.add_argument("--corruption-severity", type=int, default=3, choices=[1, 2, 3, 4, 5])
     args = parser.parse_args()
 
     return TrainConfig(
@@ -173,6 +340,9 @@ def parse_args() -> TrainConfig:
         lr=args.lr,
         weight_decay=args.weight_decay,
         seed=args.seed,
+        ece_bins=args.ece_bins,
+        eval_corruptions=not args.skip_corruption_eval,
+        corruption_severity=args.corruption_severity,
     )
 
 
